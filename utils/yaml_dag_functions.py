@@ -1,0 +1,140 @@
+from datetime import timedelta
+from airflow import DAG
+from airflow.operators.dummy_operator import DummyOperator
+from airflow.operators.bash_operator import BashOperator
+from airflow.models.baseoperator import BaseOperator
+from airflow.utils.dates import days_ago, datetime
+import os
+import sys
+import yaml
+from typing import Dict, List, Optional
+
+
+class DagTemplate:
+    """Class to extract dag config from yaml and format for DagBuilder"""
+    def __init__(self,
+                 dag_yaml_path: str,
+                 ):
+        self.dag_yaml_path: str = dag_yaml_path
+        self.dag_yaml_dir: str = os.path.dirname(dag_yaml_path)
+        with open(dag_yaml_path) as f:
+            self.dag_yaml_dict: Dict = dict(yaml.load(f, Loader=yaml.FullLoader))
+        self.dag_defn: Dict = self.read_dag_yaml()
+        self.task_defns: List[Dict] = self.read_tasks()
+
+    def read_dag_yaml(self) -> Dict:
+        if self.dag_yaml_dict.get('start_date_type') == 'days_ago':
+            start_date = days_ago(self.dag_yaml_dict.get('start_date'))
+        else:
+            start_year = self.dag_yaml_dict.get('start_date').year
+            start_month = self.dag_yaml_dict.get('start_date').month
+            start_day = self.dag_yaml_dict.get('start_date').day
+
+            start_date = datetime(int(start_year), int(start_month), int(start_day))
+        if self.dag_yaml_dict.get('schedule_type') == 'minute':
+            schedule_interval = timedelta(minutes=self.dag_yaml_dict.get('schedule_interval'))
+        elif self.dag_yaml_dict.get('schedule_type') == 'hour':
+            schedule_interval = timedelta(hours=self.dag_yaml_dict.get('schedule_interval'))
+        elif self.dag_yaml_dict.get('schedule_type') == 'day':
+            schedule_interval = timedelta(days=self.dag_yaml_dict.get('schedule_interval'))
+        else:
+            schedule_interval = self.dag_yaml_dict.get('schedule_interval', '0 0 * * *')
+
+        dag_defn = {
+            'dag_dir_path': self.dag_yaml_dict.get('root'),
+            'dag_name': self.dag_yaml_dict.get('dag_name'),
+            'catchup': self.dag_yaml_dict.get('catchup'),
+            'default_args': {
+                'owner': self.dag_yaml_dict.get('owner', 'airflow'),
+                'depends_on_past': self.dag_yaml_dict.get('depends_on_past', False),
+                'start_date': start_date,
+                'email': self.dag_yaml_dict.get('email'),
+                'email_on_failure': self.dag_yaml_dict.get('email_on_failure'),
+                'email_on_retry': self.dag_yaml_dict.get('email_on_retry'),
+                'retries': self.dag_yaml_dict.get('retries'),
+                'retry_delay': timedelta(minutes=int(self.dag_yaml_dict.get('retry_delay_mins')))
+            },
+            'schedule_interval': schedule_interval
+        }
+        return dag_defn
+
+    def read_tasks(self) -> List[Dict]:
+        tasks = []
+        for root, dirs, files in os.walk(self.dag_yaml_dir):
+            for file in files:
+                if file.endswith('.yaml') and file != 'dag.yaml':
+                    abs_yaml_path = os.path.join(root, file)
+                    # print(os.path.join(root, f))
+                    with open(abs_yaml_path) as f:
+                        tasks.append({
+                            'root': root,
+                            'file': file,
+                            'yaml': dict(yaml.load(f, Loader=yaml.FullLoader))
+                        })
+        return tasks
+
+
+class DagBuilder:
+    """Class to store and run dags"""
+    def __init__(
+            self,
+            dag_template: DagTemplate,
+            base_path: str
+    ):
+        self.dag_template: DagTemplate = dag_template
+        self.name: str = dag_template.dag_defn['dag_name']
+        self.base_path: str = base_path
+        self.dag: Optional[DAG] = None
+        self.task_operators: Dict = {}
+        self.root_task: Optional[BaseOperator] = None
+        self.task_defns: List[Dict] = dag_template.task_defns
+
+    def build(self):
+        dag_template = self.dag_template
+        self.dag = DAG(
+            dag_template.dag_defn.get('dag_name'),
+            catchup=dag_template.dag_defn.get('catchup'),
+            default_args=dag_template.dag_defn.get('default_args', {}),
+            schedule_interval=dag_template.dag_defn.get('schedule_interval', '0 0 * * *')
+        )
+        self.root_task = DummyOperator(
+            task_id='_root',
+            dag=self.dag
+        )
+        self.add_tasks()
+        self.add_task_dependencies()
+
+        return self.dag
+
+    def add_tasks(self):
+        for task in self.task_defns:
+            task_dict = task['yaml']
+            if task_dict['operator_type'] == 'python':
+                self.task_operators[task_dict['task_name']] = BashOperator(
+                    task_id=task_dict['task_name'],
+                    bash_command='''
+                    python {python_file_path} {base_directory}
+                    '''.format(
+                        python_file_path=os.path.join(self.dag_template.dag_yaml_dir, task_dict['target']),
+                        base_directory=self.base_path),
+                    dag=self.dag
+                )
+
+    def add_task_dependencies(self):
+        for task in self.task_defns:
+            task_dict = dict(task['yaml'])
+            for dependency_name in task['yaml']['dependencies']:
+                if dependency_name == '_root':
+                    self.task_operators[task_dict['task_name']].set_upstream(self.root_task)
+                if dependency_name in self.task_operators.keys():
+                    self.task_operators[task_dict['task_name']].set_upstream(self.task_operators[dependency_name])
+
+
+def find_dags(dir_path: str) -> List[str]:
+    dag_paths = []
+    for root, dirs, files in os.walk(dir_path):
+        for file in files:
+            if file == 'dag.yaml' and root != dir_path:
+                abs_yaml_path = os.path.join(root, file)
+                dag_paths.append(abs_yaml_path)
+    return dag_paths

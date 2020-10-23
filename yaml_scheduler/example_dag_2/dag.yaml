@@ -1,0 +1,14 @@
+dag_name: example_dag_2
+catchup: False
+owner: airflow
+depends_on_past: False
+start_date_type: date # date or days_ago. Default days ago if not specified
+start_date: 2020-10-01 # YYYY-MM-DD for <date> or x number of days if days_ago
+email:
+  - reivax.teo@outlook.sg
+email_on_failure: True
+email_on_retry: False
+retries: 0
+retry_delay_mins: 1
+schedule_type: cron #minute, hour, day, cron. Default cron if not specified
+schedule_interval: '0 0 * * *'

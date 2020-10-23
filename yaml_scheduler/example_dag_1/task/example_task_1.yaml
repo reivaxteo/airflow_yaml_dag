@@ -1,0 +1,5 @@
+task_name: test_task_1
+dependencies:
+  - _root
+operator_type: python
+target: task/example_task_1.py #from base directory where dag.yaml exist for this task
