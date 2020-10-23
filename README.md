@@ -16,6 +16,7 @@ This guide assumes that you have basic working knowledge of linux commands and p
 ### Clone into airflow dags folder
 1. Log in to airflow webserver instance using `docker exec -u root -it <name of airflow webserver> /bin/bash`. 
 You can find out the name of the webserver instance using `docker ps -a`
+2. install git by running `apt-get update` and `apt-get install git`
 2. Navigate to default airflow dags folder `/usr/local/airflow/dags`
 3. Clone into default airflow dags folder by running `git clone https://github.com/reivaxteo/airflow_yaml_dag.git`
 4. Install PyYaml by running `pip install PyYAML==5.3.1`
