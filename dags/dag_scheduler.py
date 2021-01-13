@@ -5,6 +5,8 @@ from airflow.operators.bash_operator import BashOperator
 from airflow.utils.dates import days_ago, datetime
 import os
 import sys
+import yaml
+from typing import Dict, List
 
 py_dir = os.path.dirname(os.path.abspath(__file__))
 base_path = os.path.dirname(py_dir)
@@ -23,10 +25,22 @@ for dag_path in dag_paths:
     try:
         dag_template = DagTemplate(dag_path)
         dag = DagBuilder(dag_template, base_path)
-        globals()[dag.name] = dag.build()
+        print(dag.name)
     except BaseException as err:
-        print('Error in parsing {}\n{}'.format(
-            dag_path,
+        print('Error in parsing dag at location {}\n{}'.format(
+            os.path.dirname(dag_path),
             str(err)
         ))
         continue
+    try:
+        globals()[dag.name] = dag.build()
+        print(f'Loading {dag.name}')
+    except BaseException as err:
+        print('Error in loading dag {} at location {}\n{}'.format(
+            dag.name,
+            os.path.dirname(dag_path),
+            str(err)
+        ))
+        continue
+
+print('Test')

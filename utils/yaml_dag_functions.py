@@ -2,16 +2,70 @@ from datetime import timedelta
 from airflow import DAG
 from airflow.operators.dummy_operator import DummyOperator
 from airflow.operators.bash_operator import BashOperator
+from airflow.operators.postgres_operator import PostgresOperator
+from airflow.operators.python_operator import PythonOperator
 from airflow.models.baseoperator import BaseOperator
+from airflow.models.skipmixin import SkipMixin
 from airflow.utils.dates import days_ago, datetime
 import os
 import sys
 import yaml
 from typing import Dict, List, Optional
+from sqlalchemy import create_engine
+
+py_dir = os.path.dirname(os.path.abspath(__file__))
+base_path = os.path.dirname(py_dir)
+sys.path.append(base_path)
+yaml_config_file_path = os.path.join(base_path, 'config', 'config.yaml')
+with open(yaml_config_file_path, 'r') as yamlfile:
+    cfg = yaml.safe_load(yamlfile)
+
+
+class MyPythonOperator(BashOperator):
+    template_fields = ('bash_command', 'env', 'python', 'base_directory',)
+    template_ext = ('.sh', '.bash', '.py',)
+
+    def __init__(
+            self,
+            python_dir,
+            *args, **kwargs):
+        bash_command = '''python {python_file_path} {base_directory}
+            '''.format(
+            python_file_path=python_dir,
+            base_directory=base_path)
+        super(MyPythonOperator, self).__init__(bash_command=bash_command, *args, **kwargs)
+        self.base_directory = base_path
+        with open(python_dir) as file:
+            self.python = file.read()
+        # self.doc_md = self.python
+
+
+class ErrorOperator(DummyOperator, SkipMixin):
+    ui_color = "red"
+    ui_fgcolor = "white"
+
+
+def run_sql(**kwargs):
+    con_target = kwargs.get('con_target')
+    sql = kwargs.get('sql')
+    if con_target == 'psql':
+        engine = create_engine('postgresql://{user}:{password}@{host}:{port}/{database}'.format(
+            user=cfg['postgres']['pg_user'],
+            password=cfg['postgres']['pg_password'],
+            host=cfg['postgres']['pg_host'],
+            port=cfg['postgres']['pg_port'],
+            database=cfg['postgres']['pg_database']
+        ))
+        with engine.connect() as connection:
+            connection.execute(sql)
+
+    else:
+        raise ValueError('Invalid connection type')
 
 
 class DagTemplate:
     """Class to extract dag config from yaml and format for DagBuilder"""
+
     def __init__(self,
                  dag_yaml_path: str,
                  ):
@@ -76,6 +130,7 @@ class DagTemplate:
 
 class DagBuilder:
     """Class to store and run dags"""
+
     def __init__(
             self,
             dag_template: DagTemplate,
@@ -101,6 +156,10 @@ class DagBuilder:
             task_id='_root',
             dag=self.dag
         )
+        self.task_operators['_missing_dependencies'] = ErrorOperator(
+            task_id='_missing_dependencies',
+            dag=self.dag
+        )
         self.add_tasks()
         self.add_task_dependencies()
 
@@ -110,23 +169,28 @@ class DagBuilder:
         for task in self.task_defns:
             task_dict = task['yaml']
             if task_dict['operator_type'] == 'python':
-                self.task_operators[task_dict['task_name']] = BashOperator(
+                self.task_operators[task_dict['task_name']] = MyPythonOperator(
                     task_id=task_dict['task_name'],
-                    bash_command='''
-                    python {python_file_path} {base_directory}
-                    '''.format(
-                        python_file_path=os.path.join(self.dag_template.dag_yaml_dir, task_dict['target']),
-                        base_directory=self.base_path),
+                    python_dir=os.path.join(self.dag_template.dag_yaml_dir, task_dict['target']),
                     dag=self.dag
                 )
+            elif task_dict['operator_type'] == 'psql':
+                self.task_operators[task_dict['task_name']] = PostgresOperator(sql=task_dict['sql'],
+                                                                               task_id=task_dict['task_name'],
+                                                                               postgres_conn_id=task_dict['con_target'],
+                                                                               autocommit=True,
+                                                                               dag=self.dag)
 
     def add_task_dependencies(self):
         for task in self.task_defns:
             task_dict = dict(task['yaml'])
+            if not task['yaml']['dependencies']:
+                self.task_operators[task_dict['task_name']].set_upstream(self.task_operators['_missing_dependencies'])
+                continue
             for dependency_name in task['yaml']['dependencies']:
                 if dependency_name == '_root':
                     self.task_operators[task_dict['task_name']].set_upstream(self.root_task)
-                if dependency_name in self.task_operators.keys():
+                elif dependency_name in self.task_operators.keys():
                     self.task_operators[task_dict['task_name']].set_upstream(self.task_operators[dependency_name])
 
 
